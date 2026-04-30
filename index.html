@@ -11,6 +11,7 @@
 <link rel="manifest" href="manifest.json">
 <link rel="apple-touch-icon" href="icon-192.png">
 <link href="https://fonts.googleapis.com/css2?family=Nunito+Sans:wght@200;300;400;600&family=Space+Mono:wght@400&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
 :root{
@@ -145,6 +146,13 @@ body::after{
 }
 .msg:hover .msg-del,.msg.show-del .msg-del{opacity:1;}
 .msg-del:active{transform:scale(0.85);}
+
+.file-card{display:flex;align-items:center;gap:10px;padding:10px 12px;background:rgba(255,255,255,0.04);border:1px solid var(--border);border-radius:12px;margin-bottom:8px;cursor:default;}
+.file-icon{width:36px;height:36px;border-radius:8px;background:rgba(211,176,110,0.12);border:1px solid rgba(211,176,110,0.2);display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;color:var(--gold-l);}
+.file-info{flex:1;min-width:0;}
+.file-name{font-size:.7rem;font-weight:400;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.file-meta{font-family:'Space Mono',monospace;font-size:.45rem;letter-spacing:1px;text-transform:uppercase;color:var(--text3);margin-top:2px;}
+.file-thumb{width:100%;max-width:240px;border-radius:12px;border:1px solid var(--border);margin-bottom:8px;display:block;}
 
 .typing{display:none;margin-bottom:12px;max-width:86%;}
 .typing.show{display:block;animation:msgIn 0.3s var(--ease) both;}
@@ -353,7 +361,7 @@ input[type="file"]{display:none;}
 </div>
 <div class="input-row">
 <button class="attach-btn" onclick="document.getElementById('fileIn').click()">+</button>
-<input type="file" id="fileIn" accept="image/*,.pdf,.xls,.xlsx,.csv" onchange="handleFile(event)">
+<input type="file" id="fileIn" accept="image/*,.pdf,.xls,.xlsx,.csv,.tsv,.svg,.md,.json,.txt" onchange="handleFile(event)">
 <div class="input-wrap">
 <textarea id="chatInput" rows="1" placeholder="Message your HOD..." onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
 </div>
@@ -493,7 +501,7 @@ function renderHistory() {
   if (!history.length) { document.getElementById('welcome').style.display = 'flex'; return; }
   document.getElementById('welcome').style.display = 'none';
   c.querySelectorAll('.msg').forEach(e => e.remove());
-  history.forEach((m, i) => addMsg(m.role === 'user' ? 'u' : 'a', m.content, false, i));
+  history.forEach((m, i) => addMsg(m.role === 'user' ? 'u' : 'a', m.content, false, i, m.file || null));
   scrollBottom();
 }
 
@@ -508,14 +516,26 @@ function deleteMsg(idx) {
   history.splice(idx, 1); saveHist(); updateCount(); renderHistory();
 }
 
-function addMsg(type, content, animate = true, histIdx = -1) {
+function addMsg(type, content, animate = true, histIdx = -1, fileData = null) {
   const c = document.getElementById('msgs');
   document.getElementById('welcome').style.display = 'none';
   const d = document.createElement('div');
   d.className = 'msg msg-' + type;
   if (!animate) { d.style.animation = 'none'; d.style.opacity = '1'; }
   const b = document.createElement('div'); b.className = 'bbl';
-  if (type === 'a') b.innerHTML = md(content); else b.textContent = content;
+  if (fileData) {
+    if (fileData.thumb) {
+      const img = document.createElement('img'); img.className = 'file-thumb'; img.src = fileData.thumb; img.alt = fileData.name;
+      b.appendChild(img);
+    } else {
+      const fc = document.createElement('div'); fc.className = 'file-card';
+      const icons = {pdf:'📄',xls:'📊',xlsx:'📊',csv:'📊',svg:'🎨',md:'📝',json:'📋',txt:'📄'};
+      const ext = (fileData.name.split('.').pop() || '').toLowerCase();
+      fc.innerHTML = '<div class="file-icon">' + (icons[ext] || '📎') + '</div><div class="file-info"><div class="file-name">' + fileData.name + '</div><div class="file-meta">' + fileData.size + '</div></div>';
+      b.appendChild(fc);
+    }
+  }
+  if (content) { const txt = document.createElement('div'); if (type === 'a') txt.innerHTML = md(content); else txt.textContent = content; b.appendChild(txt); }
   const tm = document.createElement('div'); tm.className = 'msg-time';
   const t = new Date().toLocaleTimeString('en-IN', {hour:'2-digit',minute:'2-digit'});
   tm.textContent = type === 'u' ? t : agentName.toLowerCase() + ' · ' + t;
@@ -578,28 +598,65 @@ async function send() {
   const input = document.getElementById('chatInput');
   const text = input.value.trim();
   if ((!text && !uploadedFile) || streaming) return;
-  if (text) { addMsg('u', text); history.push({role:'user', content: text}); }
-  saveHist(); updateCount(); input.value = ''; input.style.height = 'auto';
-  document.getElementById('sendBtn').disabled = true;
-  userAtBottom = true; scrollBottom();
 
+  let fileMeta = null;
   let fileContent = null;
+  let fileText = null;
+
   if (uploadedFile) {
-    const buf = await uploadedFile.arrayBuffer();
-    const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
-    const mtype = uploadedFile.type || 'application/octet-stream';
+    const fname = uploadedFile.name.toLowerCase();
+    const fsize = uploadedFile.size < 1024*1024 ? (uploadedFile.size/1024).toFixed(0) + ' KB' : (uploadedFile.size/1024/1024).toFixed(1) + ' MB';
+    fileMeta = {name: uploadedFile.name, size: fsize};
+
     if (uploadedFile.type.startsWith('image/')) {
-      fileContent = {type:'image', source:{type:'base64', media_type:mtype, data:b64}};
+      const b64full = await new Promise((res,rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(uploadedFile); });
+      const b64 = b64full.split(',')[1];
+      fileContent = {type:'image', source:{type:'base64', media_type:uploadedFile.type, data:b64}};
+      fileMeta.thumb = b64full;
+    } else if (uploadedFile.type === 'application/pdf') {
+      const b64 = await fileToBase64(uploadedFile);
+      fileContent = {type:'document', source:{type:'base64', media_type:'application/pdf', data:b64}};
+    } else if (fname.endsWith('.csv') || fname.endsWith('.tsv') || fname.endsWith('.txt') || fname.endsWith('.svg') || fname.endsWith('.md') || fname.endsWith('.json')) {
+      fileText = await uploadedFile.text();
+      fileText = '\ud83d\udcce File: ' + uploadedFile.name + '\n\n' + fileText;
+    } else if (fname.endsWith('.xls') || fname.endsWith('.xlsx')) {
+      try {
+        const buf = await uploadedFile.arrayBuffer();
+        const wb = XLSX.read(buf, {type:'array'});
+        let csv = '';
+        wb.SheetNames.forEach(name => { csv += '--- Sheet: ' + name + ' ---\n' + XLSX.utils.sheet_to_csv(wb.Sheets[name]) + '\n\n'; });
+        fileText = '\ud83d\udcce File: ' + uploadedFile.name + '\n\n' + csv;
+      } catch(e) { fileText = '\ud83d\udcce File: ' + uploadedFile.name + ' (could not parse XLS - try CSV instead)'; }
     } else {
-      fileContent = {type:'document', source:{type:'base64', media_type:mtype, data:b64}};
+      try { fileText = '\ud83d\udcce File: ' + uploadedFile.name + '\n\n' + await uploadedFile.text(); } catch(e) { fileText = '\ud83d\udcce File: ' + uploadedFile.name + ' (unsupported format)'; }
     }
     clearUpload();
   }
 
-  await callAPI(text, fileContent);
+  const histEntry = {role:'user', content: text || ''};
+  if (fileMeta) {
+    histEntry.file = {name: fileMeta.name, size: fileMeta.size};
+    if (fileMeta.thumb && fileMeta.thumb.length < 50000) histEntry.file.thumb = fileMeta.thumb;
+  }
+  addMsg('u', text, true, -1, fileMeta);
+  history.push(histEntry);
+  saveHist(); updateCount(); input.value = ''; input.style.height = 'auto';
+  document.getElementById('sendBtn').disabled = true;
+  userAtBottom = true; scrollBottom();
+
+  await callAPI(text, fileContent, fileText);
 }
 
-async function callAPI(text, fileContent) {
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result.split(',')[1]);
+    r.onerror = () => reject(new Error('File read failed'));
+    r.readAsDataURL(file);
+  });
+}
+
+async function callAPI(text, fileContent, fileText) {
   streaming = true;
   document.getElementById('typingEl').classList.add('show'); scrollBottom();
 
@@ -608,6 +665,13 @@ async function callAPI(text, fileContent) {
     const last = msgs[msgs.length - 1];
     if (last && last.role === 'user') {
       last.content = [fileContent, {type:'text', text: last.content || 'Analyze this file.'}];
+    }
+  } else if (fileText) {
+    const last = msgs[msgs.length - 1];
+    if (last && last.role === 'user') {
+      last.content = (last.content || '') + '\n\n' + fileText;
+    } else {
+      msgs.push({role:'user', content: fileText});
     }
   }
 
